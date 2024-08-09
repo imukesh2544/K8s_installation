@@ -1,0 +1,219 @@
+
+************************************>>Step1 (Fire on all nodes )<<************************************
+
+#>>temporarily disable SELinux. The next time you reboot the server, selinux will be back on.
+sudo setenforce 0 
+
+#>>modify a specific line in the /etc/selinux/config file.
+sudo sed -i 's/^SELINUX=enforcing$/SELINUX=permissive/' /etc/selinux/config  
+
+# disable swap
+sudo sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
+swapoff -a #check if swap is off
+
+#>>modify a specific line in the /etc/modules-load.d/k8s.conf file
+cat <<EOF | sudo tee /etc/modules-load.d/k8s.conf
+overlay
+br_netfilter
+EOF
+
+#>>When you run sudo modprobe <module_name>, you're instructing the system to load the specified kernel module (<module_name>) into the kernel. 
+#>>This is often used to enable or configure hardware, add support for filesystems, or prepare the kernel for specific software or services.
+sudo modprobe overlay
+sudo modprobe br_netfilter
+
+#>>modify a specific line in the /etc/sysctl.d/k8s.conf
+cat <<EOF | sudo tee /etc/sysctl.d/k8s.conf
+net.bridge.bridge-nf-call-iptables  = 1
+net.bridge.bridge-nf-call-ip6tables = 1
+net.ipv4.ip_forward                 = 1
+EOF
+
+#>>used to reload the sysctl configuration in a Linux system. 
+sudo sysctl --system
+
+#>>used to list kernel modules and then filter the output to show required output.(Makes sure that changes are done successfully.)
+lsmod | grep br_netfilter
+lsmod | grep overlay
+
+sysctl net.bridge.bridge-nf-call-iptables net.bridge.bridge-nf-call-ip6tables net.ipv4.ip_forward
+
+#>> Ensure that the machine is registered to rhel dashboard for further installation
+subscription-manager register
+subscription-manager auto-attach
+
+dnf update -y
+dnf install -y iproute-tc
+
+------------------------------------------------------------------------------------------------------------------------
+***********************************************master only**************************************************************
+-----------------------------------------------------------------------------------------------------------------------------------------
+
+firewall-cmd --permanent --add-port=6443/tcp
+firewall-cmd --permanent --add-port=2379-2380/tcp
+firewall-cmd --permanent --add-port=10250/tcp
+firewall-cmd --permanent --add-port=10251/tcp
+firewall-cmd --permanent --add-port=10252/tcp
+firewall-cmd --reload
+
+-----------------------------------------------------------------------------------------------------------------------------------------
+***********************************************************worker only*******************************************************
+-----------------------------------------------------------------------------------------------------------------------------------------
+
+firewall-cmd --permanent --add-port=10250/tcp
+firewall-cmd --permanent --add-port=30000-32767/tcp
+firewall-cmd --reload
+-----------------------------------------------------------------------------------------------------------------------------------------
+-----------------------------------------------------------------------------------------------------------------------------------------
+
+yum install -y yum-utils
+sudo yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+
+dnf remove podman buildah -y
+yum install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin -y
+systemctl enable --now docker
+docker ps
+
+-----------------------------------------------------------------------------------------------------------------------------------------
+--------------------------------------------------------------------------------------------------------------------------------------
+
+containerd config default | sudo tee /etc/containerd/config.toml >/dev/null 2>&1
+sudo sed -i 's/SystemdCgroup \= false/SystemdCgroup \= true/g' /etc/containerd/config.toml
+systemctl restart containerd
+
+cat <<EOF | sudo tee /etc/yum.repos.d/kubernetes.repo
+[kubernetes]
+name=Kubernetes
+baseurl=https://pkgs.k8s.io/core:/stable:/v1.28/rpm/
+enabled=1
+gpgcheck=1
+gpgkey=https://pkgs.k8s.io/core:/stable:/v1.28/rpm/repodata/repomd.xml.key
+exclude=kubelet kubeadm kubectl cri-tools kubernetes-cni
+EOF
+
+yum install -y kubelet kubeadm kubectl --disableexcludes=kubernetes
+systemctl enable --now kubelet
+systemctl status docker
+kubectl version
+kubeadm version
+
+-----------------------------------------------------------------------------------------------------------------------------------------
+***********************************************master only**************************************************************
+-----------------------------------------------------------------------------------------------------------------------------------------
+
+kubeadm init --pod-network-cidr=10.244.0.0/16  --control-plane-endpoint=10.48.71.205 --ignore-preflight-errors=Mem --cri-socket /run/containerd/containerd.sock
+kubectl get no
+mkdir -p $HOME/.kube
+sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+sudo chown $(id -u):$(id -g) $HOME/.kube/config
+sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+
+-----------------------------------------------------------------------------------------------------------------------------------------
+
+******If the token is lost or unavailable*******
+kubeadm token create --print-join-command
+
+-----------------------------------------------------------------------------------------------------------------------------------------
+
+-----------------------------------------------------------------------------------------------------------------------------------------
+***********************************************************worker only*******************************************************
+-----------------------------------------------------------------------------------------------------------------------------------------
+
+Join command will be generated by the master node which need to be run on worker node
+**** One more command would be generated for joining another master node.
+**kubeadm join 10.48.71.205:6443 --token f5zh5n.39zcb2nyt3llbhxk --discovery-token-ca-cert-hash sha256:34653439db3257bf4db180c71355703092ad6b8d01dc3438eae89e78aa317fac**
+
+-----------------------------------------------------------------------------------------------------------------------------------------
+----------------------------------------------------------------------------------------------------------------------------------------
+
+kubectl get no
+
+kubectl create -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml
+
+-----------------------------------------------------------------------------------------------------------------------------------------
+***********************************************************Cluster is ready*******************************************************
+***********************************************************The End*******************************************************
+-----------------------------------------------------------------------------------------------------------------------------------------
+
+
+-----------------------------------------------------------------------------------------------------------------------------------------
+ALIAS COMMAND **PERMANENT ALIAS**
+
+vi .bashrc
+source .bashrc
+k get no
+
+For temporary**
+alias k=kubectl
+-----------------------------------------------------------------------------------------------------------------------------------------
+-----------------------------------------------------------------------------------------------------------------------------------------
+
+
+-----------------------------------------------------------------------------------------------------------------------------------------
+***********************************************************Resetting cluster*******************************************************
+***********************************************************Fire on all  nodes*******************************************************
+-----------------------------------------------------------------------------------------------------------------------------------------
+
+kubeadm reset
+rm -rf .kube/
+ls /etc/cni/
+rm -rf /etc/cni/net.d
+
+
+
+
+-----------------------------------------------------------------------------------------------------------------------------------------
+***********************************************************Resetting cluster*******************************************************
+***********************************************************Fire on all  nodes*******************************************************
+-----------------------------------------------------------------------------------------------------------------------------------------
+issue- coredns pending 
+resolution- containerd restart
+
+*****************************************************************************************************************
+
+         FOR MULTI-MASTER CLUSTER 
+********** only on jump-post ************
+we need 1 jump-post as a load balancer and on that we need to install haproxy
+yum install haproxy
+systemctl status haproxy
+systemctl start haproxy
+
+vim /etc/haproxy/haproxy.cfg
+
+#---------------------------------------------------------------------
+# main frontend which proxys to the backends
+#---------------------------------------------------------------------
+
+ 
+
+frontend fe-apiserver
+    bind 0.0.0.0:6443
+    mode tcp
+    option tcplog
+    default_backend be-apiserver
+
+ 
+
+#---------------------------------------------------------------------
+# static backend for serving up images, stylesheets and such
+#---------------------------------------------------------------------
+
+ 
+
+backend be-apiserver
+    mode tcp
+    option tcplog
+    option tcp-check
+    balance roundrobin
+    default-server inter 10s downinter 5s rise 2 fall 2 slowstart 60s maxconn 250 maxqueue 256 weight 100
+
+ 
+
+    server kastenmaster01 10.48.71.237:6443 check
+    server kastenmaster02 10.48.71.252:6443 check
+    server kastenmaster03 10.48.71.236:6443 check
+
+systemctl restart haproxy
+
+*********on master-1 only************** 
+kubeadm init --pod-network-cidr=10.244.0.0/16  --control-plane-endpoint=13.126.42.0:6443 --upload-certs  ## in the control-plane just put the ip of the jump post or where the haproxy load balancer is set up ##
